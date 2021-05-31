@@ -516,7 +516,6 @@ readcopy:  lda     r9                  ; copy rb bytes from dta at m(r9)
            dec     r8                 ; clear read data flag
            dec     r8
 
- bn4 $
            sep     scall              ; get another sector
            dw      incofs1
 
