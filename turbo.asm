@@ -16,11 +16,9 @@
 
            ; Define non-public API elements
 
-version    equ     0400h
-himem      equ     0442h
-incofs1    equ     046ah
-append     equ     046dh
-lmpmask    equ     047ch
+d_incofs1  equ     046ah
+d_append   equ     046dh
+k_lmpmask  equ     0473h
 
 scall      equ     4
 sret       equ     5
@@ -37,130 +35,88 @@ start:     org     2000h
 
            ; Build information
 
-           db      1+80h              ; month
-           db      12                 ; day
+           db      7+80h              ; month
+           db      20                 ; day
            dw      2021               ; year
-           dw      1                  ; build
+           dw      2                  ; build
            db      'Written by David S. Madole',0
 
            ; Installer code
 
-entry:     ldi     0                  ; by default, load to high mem
-           plo     re
-
-skipspac:  lda     ra                 ; look for -k option to load to
-           bz      endopts            ; kernel memory
-           smi     ' '
-           bz      skipspac
-           smi     '-'-' '
-           bnz     optfail
-
-           lda     ra
-           smi     'k'
-           bnz     optfail
-
-           lda     ra
-           bnz     optfail
-
-           inc     re                 ; set flag to install to kernel mem
-
-           glo     r2                 ; check that there is enough space
-           smi     0f8h
-           ghi     r2
-           smbi    01dh
-           bdf     kernfail
-
-endopts:   ldi     o_read.1           ; check if read or write already
+entry:     ldi     high o_read        ; check if read or write already
            phi     r7                 ; point outside the kernel, dont
-           ldi     o_read.0           ; install if so
+           ldi     low o_read         ; install if so
            plo     r7
 
            inc     r7
            ldn     r7
-           smi     1eh
-           bdf     hookfail
+           smi     20h
+           lbdf    hookfail
 
-           ldi     o_write.1
+           ldi     high o_write
            phi     r7
-           ldi     o_write.0
+           ldi     low o_write
            plo     r7
 
            inc     r7
            ldn     r7
-           smi     1eh
-           bdf     hookfail
+           smi     20h
+           lbdf    hookfail
 
-           ldi     minver.1           ; pointer to minimum version needed
-           phi     r7
-           ldi     minver.0
-           plo     r7
-
-           ldi     version.1          ; pointer to installed kernel version
+           ldi     high k_ver         ; pointer to installed kernel version
            phi     r8
-           ldi     version.0
+           ldi     low k_ver
            plo     r8
 
-           ldi     3
-           plo     rf
+           lda     r8
+           lbnz    verspass
 
-verloop:   lda     r7                 ; subtract min version from installed
-           sex     r8
-           sd
-           irx
-           sex     r2
-           bnf     verfail            ; negative, install < min, so fail
-           bnz     verpass            ; positive, install > min, so pass
+           lda     r8
+           smi     4
+           lbnf    versfail
 
-           dec     rf                 ; equal, so keep checking
-           glo     rf
-           bnz     verloop            ; if we exit this versions are same
+           ; Allocate a page-aligned block from the heap by brute-force
 
-verpass:   ldi     himem.1            ; pointer to top of memory variable
+verspass:  ldi     high end-read
+           phi     rc
+           ldi     low end-read
+           plo     rc
+
+           ldi     0
            phi     r7
-           ldi     himem.0
+           ldi     4
            plo     r7
 
-           ldi     (end-read).1       ; get length of code to install
-           phi     rf
-           ldi     (end-read).0
-           plo     rf
+           lbr     doalloc
 
-           sex     r7
+alloclp:   sep     scall
+           dw      o_dealloc
 
-           glo     rf                 ; subtract size to install from himem
-           inc     r7                 ; point to himem lsb
-           sd                         ; discard lsb result
-           ghi     rf
-           dec     r7                 ; point to himem msb
-           sdb
-           phi     r8                 ; r8 is address to install to
-           phi     r9                 ; save extra copy in r9
+           inc     rc
 
-           sex     r2
+doalloc:   sep     scall
+           dw      o_alloc
 
-           ldi     0                  ; round result down to page boundary
+           glo     rf
+           lbnz    alloclp
+
+           glo     rf
            plo     r8
-           plo     r9                 ; extra copy
-
-           glo     re                 ; check where we are installing
-           bz      usehimem
-
-           ldi     1eh                ; discard prior himem calculation
+           plo     r9
+           ghi     rf
            phi     r8
            phi     r9
-           br      getsourc
 
-usehimem:  dec     r8                 ; set himem to one less than install
-           ghi     r8                 ; address to reserve memory block
-           str     r7
-           inc     r7
-           glo     r8
-           str     r7
-           inc     r8                 ; restore to destination address
+           ; Copy module code into heap block
 
-getsourc:  ldi     read.1             ; get source address
+           ldi     high end-read
+           phi     rf
+           ldi     low end-read
+           plo     rf
+
+           ldi     high read          ; get source address
            phi     r7
-           ldi     read.0
+           ldi     low read
            plo     r7
 
 copycode:  lda     r7                 ; copy code to destination address
@@ -168,13 +124,15 @@ copycode:  lda     r7                 ; copy code to destination address
            inc     r8
            dec     rf
            glo     rf
-           bnz     copycode
+           lbnz    copycode
            ghi     rf
-           bnz     copycode
+           lbnz    copycode
 
-           ldi     o_read.1           ; patch o_read to point to new
+           ; Patch kernel vectors to point to module replacements
+
+           ldi     high o_read        ; patch o_read to point to new
            phi     r7
-           ldi     o_read.0
+           ldi     low o_read
            plo     r7
 
            inc     r7
@@ -185,15 +143,15 @@ copycode:  lda     r7                 ; copy code to destination address
            str     r7
 
            glo     r9
-           adi     (write-read).0
+           adi     low write-read
            plo     r9
            ghi     r9
-           adci    (write-read).1
+           adci    high write-read
            phi     r9
 
-           ldi     o_write.1         ; patch o_write to point to new
+           ldi     high o_write      ; patch o_write to point to new
            phi     r7
-           ldi     o_write.0
+           ldi     low o_write
            plo     r7
 
            inc     r7
@@ -203,62 +161,30 @@ copycode:  lda     r7                 ; copy code to destination address
            glo     r9
            str     r7
 
-           ldi     success.1
-           stxd
-           ldi     success.0
-           stxd
-
-output:    ldi     message.1
-           phi     rf
-           ldi     message.0
-           plo     rf
-
-           sep     scall
-           dw      o_msg
-
-           inc     r2
-           lda     r2
-           plo     rf
-           ldn     r2
-           phi     rf
-
-           sep     scall
-           dw      o_msg
+output:    sep     scall
+           dw      o_inmsg
+           db      'Turbo Filesystem Module Build 2 for Elf/OS',13,10,0
 
            sep     sret
 
-hookfail:  ldi     hookmsg.1
-           stxd
-           ldi     hookmsg.0
-           stxd
-           br      output
+hookfail:  sep     scall
+           dw      o_inmsg
+           db      'ERROR: Read or write routines already hooked',13,10,0
 
-verfail:   ldi     vermsg.1
-           stxd
-           ldi     vermsg.0
-           stxd
-           br      output
+           sep     sret
 
-optfail:   ldi     optmsg.1
-           stxd
-           ldi     optmsg.0
-           stxd
-           br      output
+versfail:  sep     scall
+           dw      o_inmsg
+           db      'ERROR: Needs kernel version 0.4.0 or higher',13,10,0
 
-kernfail:  ldi     kernmsg.1
-           stxd
-           ldi     kernmsg.0
-           stxd
-           br      output
+           sep     sret
 
-message:   db      'Turbo Filesystem Module Build 1 for Elf/OS',13,10,0
-success:   db      'Copyright 2021 by David S Madole',13,10,0
-optmsg:    db      'ERROR: Invalid option specified for command',13,10,0
-vermsg:    db      'ERROR: Needs kernel version 0.3.1 or higher',13,10,0
-hookmsg:   db      'ERROR: Read or write routines already hooked',13,10,0
-kernmsg:   db      'ERROR: Insufficient kernel memory to install',13,10,0
+optfail:   sep     scall
+           dw      o_inmsg
+           db      'ERROR: Invalid option specified for command',13,10,0
 
-minver:    db      0,3,1              ; minimum kernel version
+           sep     sret
+
 
            ; Read bytes from file
            ;
@@ -370,9 +296,9 @@ readloop:  inc     rd
 
            inc     r8                  ; remember weve already done this
 
-           ldi     lmpmask.1
+           ldi     high k_lmpmask
            phi     r9
-           ldi     lmpmask.0
+           ldi     low k_lmpmask
            plo     r9                  ; r9 = lmpmask
            ldn     r9
            plo     re
@@ -436,10 +362,10 @@ readdata:  lda     rd                  ; get sector offset as low 9 bits of
            sex     r2
 
            glo     rb                  ; find what is left in sector by
-           sdi     512.0               ; subtracting sector offset from 512
+           sdi     low 512             ; subtracting sector offset from 512
            plo     rb                  ; overwrite original value
            ghi     rb
-           sdbi    512.1
+           sdbi    high 512
            phi     rb
 
            glo     rb                  ; compare bytes requested to bytes
@@ -517,7 +443,7 @@ readcopy:  lda     r9                  ; copy rb bytes from dta at m(r9)
            dec     r8
 
            sep     scall              ; get another sector
-           dw      incofs1
+           dw      d_incofs1
 
            glo     ra
            bnz     readloop
@@ -665,10 +591,10 @@ writloop:  inc     rd
            sex     r2
 
            glo     rb                  ; find the space left in sector by
-           sdi     512.0               ; subtracting sector offset from 512
+           sdi     low 512             ; subtracting sector offset from 512
            plo     rb                  ; overwrite original value
            ghi     rb
-           sdbi    512.1
+           sdbi    high 512
            phi     rb
 
            glo     rb                  ; compare bytes to write to bytes
@@ -752,9 +678,9 @@ writupdt:  glo     rb
            ; past the eof offset, if it is, then update the eof offset to
            ; match the file offset since we are extending the file.
 
-           ldi     lmpmask.1
+           ldi     high k_lmpmask
            phi     r6
-           ldi     lmpmask.0
+           ldi     low k_lmpmask
            plo     r6                  ; r6 = lmpmask
            ldn     r6
            plo     re
@@ -790,7 +716,7 @@ writupdt:  glo     rb
            bnz     writnapp
 
            sep     scall               ; append a new lump if eof offset
-           dw      append              ; wrapped to zero
+           dw      d_append            ; wrapped to zero
 
 writnapp:  bdf     writcopy            ; if eof offset is larger or equal
 
@@ -822,7 +748,7 @@ writcopy:  lda     rf                  ; copy rb bytes from dta at m(r9)
            dec     r8
 
            sep     scall              ; get another sector
-           dw      incofs1
+           dw      d_incofs1
 
            glo     ra
            bnz     writloop

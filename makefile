@@ -1,7 +1,7 @@
 PROJECT = turbo
 
 $(PROJECT).prg: $(PROJECT).asm bios.inc
-	rcasm -l -v -x -d1802 $(PROJECT) 2>&1 | tee $(PROJECT).lst
+	rcasm -l -v -x -d1802 $(PROJECT) > $(PROJECT).lst
 	hextobin $(PROJECT)
 
 clean:
