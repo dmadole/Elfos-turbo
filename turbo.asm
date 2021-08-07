@@ -1,18 +1,25 @@
 
-; This software is copyright 2021 by David S. Madole.
-; You have permission to use, modify, copy, and distribute
-; this software so long as this copyright notice is retained.
-; This software may not be used in commercial applications
-; without express written permission from the author.
+;  Copyright 2021, David S. Madole <david@madole.net>
 ;
-; The author grants a license to Michael H. Riley to use this
-; code for any purpose he sees fit, including commercial use,
-; and without any need to include the above notice.
+;  This program is free software: you can redistribute it and/or modify
+;  it under the terms of the GNU General Public License as published by
+;  the Free Software Foundation, either version 3 of the License, or
+;  (at your option) any later version.
+;
+;  This program is distributed in the hope that it will be useful,
+;  but WITHOUT ANY WARRANTY; without even the implied warranty of
+;  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;  GNU General Public License for more details.
+;
+;  You should have received a copy of the GNU General Public License
+;  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
            ; Include kernal API entry points
 
+           include bios.inc
            include kernel.inc
+
 
            ; Define non-public API elements
 
@@ -20,8 +27,6 @@ d_incofs1  equ     046ah
 d_append   equ     046dh
 k_lmpmask  equ     0473h
 
-scall      equ     4
-sret       equ     5
 
            ; Executable program header
 
@@ -30,161 +35,172 @@ sret       equ     5
            dw      end-start
            dw      start
 
-start:     org     2000h
-           br      entry
+start:     br      entry
+
 
            ; Build information
 
-           db      7+80h              ; month
-           db      20                 ; day
+           db      8+80h              ; month
+           db      6                  ; day
            dw      2021               ; year
-           dw      2                  ; build
-           db      'Written by David S. Madole',0
+           dw      0                  ; build
 
-           ; Installer code
+           db      'See github.com/dmadole/Elfos-turbo for more info',0
 
-entry:     ldi     high o_read        ; check if read or write already
-           phi     r7                 ; point outside the kernel, dont
-           ldi     low o_read         ; install if so
-           plo     r7
 
-           inc     r7
-           ldn     r7
-           smi     20h
-           lbdf    hookfail
+           ; Check if hook points have already been patched and do not
+           ; install if so, since we don't know what it is or what the
+           ; impact might be of disconnecting it.
 
-           ldi     high o_write
-           phi     r7
-           ldi     low o_write
-           plo     r7
+entry:     ldi     high hooklist      ; Get point to table of patch points
+           phi     rd
+           ldi     low hooklist
+           plo     rd
 
-           inc     r7
-           ldn     r7
-           smi     20h
-           lbdf    hookfail
+chekloop   lda     rd                 ; a zero marks end of the table
+           lbz     chekvers
 
-           ldi     high k_ver         ; pointer to installed kernel version
-           phi     r8
-           ldi     low k_ver
-           plo     r8
-
-           lda     r8
-           lbnz    verspass
-
-           lda     r8
-           smi     4
-           lbnf    versfail
-
-           ; Allocate a page-aligned block from the heap by brute-force
-
-verspass:  ldi     high end-read
-           phi     rc
-           ldi     low end-read
-           plo     rc
-
-           ldi     0
-           phi     r7
-           ldi     4
-           plo     r7
-
-           lbr     doalloc
-
-alloclp:   sep     scall
-           dw      o_dealloc
-
-           inc     rc
-
-doalloc:   sep     scall
-           dw      o_alloc
-
-           glo     rf
-           lbnz    alloclp
-
-           glo     rf
-           plo     r8
-           plo     r9
-           ghi     rf
-           phi     r8
-           phi     r9
-
-           ; Copy module code into heap block
-
-           ldi     high end-read
-           phi     rf
-           ldi     low end-read
+           phi     rf                 ; get pointer to patch point
+           lda     rd
            plo     rf
 
-           ldi     high read          ; get source address
-           phi     r7
-           ldi     low read
-           plo     r7
+           inc     rf                 ; skip the lbr opcode
 
-copycode:  lda     r7                 ; copy code to destination address
-           str     r8
-           inc     r8
-           dec     rf
-           glo     rf
-           lbnz    copycode
-           ghi     rf
-           lbnz    copycode
+           ldn     rd                 ; if points into kernel then ok
+           smi     20h
+           lbdf    cheknext
 
-           ; Patch kernel vectors to point to module replacements
-
-           ldi     high o_read        ; patch o_read to point to new
-           phi     r7
-           ldi     low o_read
-           plo     r7
-
-           inc     r7
-           ghi     r9
-           str     r7
-           inc     r7
-           glo     r9
-           str     r7
-
-           glo     r9
-           adi     low write-read
-           plo     r9
-           ghi     r9
-           adci    high write-read
-           phi     r9
-
-           ldi     high o_write      ; patch o_write to point to new
-           phi     r7
-           ldi     low o_write
-           plo     r7
-
-           inc     r7
-           ghi     r9
-           str     r7
-           inc     r7
-           glo     r9
-           str     r7
-
-output:    sep     scall
+           sep     scall              ; quit with error message
            dw      o_inmsg
-           db      'Turbo Filesystem Module Build 2 for Elf/OS',13,10,0
-
+           db      'ERROR: Read or write hooks already installed',13,10,0
            sep     sret
 
-hookfail:  sep     scall
-           dw      o_inmsg
-           db      'ERROR: Read or write routines already hooked',13,10,0
+cheknext:  inc     rd                 ; skip target address in table
+           inc     rd
 
-           sep     sret
+           lbr     chekloop           ; repeat for all
 
-versfail:  sep     scall
+
+           ; Check minimum needed kernel version 0.4.0 in order to have
+           ; heap manager available, also lmp_mask moved in that version
+
+chekvers:  ldi     high k_ver         ; pointer to installed kernel version
+           phi     rd
+           ldi     low k_ver
+           plo     rd
+
+           lda     rd                 ; if major is non-zero then good
+           lbnz    allocmem
+
+           lda     rd                 ; if minor is 4 or more then good
+           smi     4
+           lbdf    allocmem
+
+           sep     scall              ; quit with error message
            dw      o_inmsg
            db      'ERROR: Needs kernel version 0.4.0 or higher',13,10,0
-
            sep     sret
 
-optfail:   sep     scall
+
+           ; Allocate a page-aligned block from the heap for storage of
+           ; the persistent code module. Make it permanent so it will
+           ; not get cleaned up at program exit.
+
+allocmem:  ldi     high end-module     ; length of persistent module
+           phi     rc
+           ldi     low end-module
+           plo     rc
+
+           ldi     255                 ; page-aligned
+           phi     r7
+           ldi     4                   ; permanent
+           plo     r7
+
+           sep     scall               ; request memory block
+           dw      o_alloc
+           lbnf    gotalloc
+
+           sep     scall               ; return with error
            dw      o_inmsg
-           db      'ERROR: Invalid option specified for command',13,10,0
-
+           db      'ERROR: Could not allocate memeory from heap',13,10,0
            sep     sret
 
+gotalloc:  ghi     rf                  ; Offset to adjust addresses with
+           smi     high module
+           stxd
+
+
+           ; Copy module code into the permanent heap block
+
+           ldi     high end-module     ; length of code to copy
+           phi     rc
+           ldi     low end-module
+           plo     rc
+
+           ldi     high module         ; get source address
+           phi     rd
+           ldi     low module
+           plo     rd
+
+copycode:  lda     rd                  ; copy code to destination address
+           str     rf
+           inc     rf
+           dec     rc
+           glo     rc
+           lbnz    copycode
+           ghi     rc
+           lbnz    copycode
+
+
+           ; Update kernel hooks to point to the copied module code
+
+           ldi     high hooklist      ; Get point to table of patch points
+           phi     rd
+           ldi     low hooklist
+           plo     rd
+
+           inc     r2                 ; point to page offset on stack
+
+hookloop:  lda     rd                 ; a zero marks end of the table
+           lbz     finished
+
+           phi     rf                 ; get pointer to vector to hook
+           lda     rd
+           plo     rf
+
+           inc     rf                 ; skip the lbr opcode
+
+           lda     rd                 ; add offset to get copy address
+           add                        ;  and update into vector
+           str     rf
+           inc     rf
+           lda     rd
+           str     rf
+
+           lbr     hookloop           ; repeat for all
+
+
+           ; Installation is complete, show banner and return
+
+finished:  sep     scall              ; output message
+           dw      o_inmsg
+           db      'Turbo Filesystem Module Build 0 for Elf/OS',13,10,0
+           sep     sret
+
+
+           ; Table giving addresses of jump vectors we need to update
+           ; to point to us instead, along with address in the module
+           ; before copying to repoint those too. The address will be
+           ; adject to the copy when patching is done.
+
+hooklist:  dw      o_read, read
+           dw      o_write, write
+           db      0
+
+
+           org     $ + 0ffh & 0ff00h
+
+module:    ; Code for persistent module starts here
 
            ; Read bytes from file
            ;
@@ -200,30 +216,28 @@ optfail:   sep     scall
            ;   DF - Set if error occurred
            ;   D  - Error code
 
-           org     $ + 0ffh & 0ff00h
-
-read:      glo     rd                   ; advance to flags, but save before
+read:      glo     rd                  ; advance to flags, but save before
            stxd
            adi     8
            plo     rd
            ghi     rd
            str     r2
            adci    0
-           phi     rd                   ; rd = fd+8 (flags)
+           phi     rd                  ; rd = fd+8 (flags)
 
            ldn     rd
            plo     re
 
-           lda     r2                   ; restore original rd
+           lda     r2                  ; restore original rd
            phi     rd
            ldn     r2
-           plo     rd                   ; rd = fd+0 (base)
+           plo     rd                  ; rd = fd+0 (base)
 
            glo     re
            ani     8
            bnz     readvlid
 
-           ldi     2<<1 + 1		; return d=2, df=1, invalid fd
+           ldi     2<<1 + 1            ; return d=2, df=1, invalid fd
            br      readsret
 
 readvlid:  glo     rc                  ; if there is nothing to do, return
@@ -321,7 +335,7 @@ readloop:  inc     rd
            phi     r9                  ; r9 = bytes to eof
            sex     r2
 
-	   bnz     readneof            ; if bytes remaining to eof are not
+           bnz     readneof            ; if bytes remaining to eof are not
            glo     r9                  ; zero then continue reading
            bz      readpopr
 
@@ -389,7 +403,7 @@ readleft:  inc     r8                  ; set flag to load more data
 
 readupdt:  glo     rb
            str     r2
-           glo	   ra                  ; subtract bytes we are going to copy 
+           glo     ra                  ; subtract bytes we are going to copy 
            sm                          ; from bytes requested and at the 
            plo     ra                  ; same time put into loop counter rb
            ghi     rb
@@ -435,39 +449,39 @@ readcopy:  lda     r9                  ; copy rb bytes from dta at m(r9)
            ghi     rb
            bnz     readcopy
 
-           glo     r8                 ; check if flag is set to read data
+           glo     r8                  ; check if flag is set to read data
            ani     2
-           bz      readretn           ; if not, we are done
+           bz      readretn            ; if not, we are done
 
-           dec     r8                 ; clear read data flag
+           dec     r8                  ; clear read data flag
            dec     r8
 
-           sep     scall              ; get another sector
+           sep     scall               ; get another sector
            dw      d_incofs1
 
            glo     ra
            bnz     readloop
            ghi     ra
-           bnz     readloop           ; and finish satisfying request
+           bnz     readloop            ; and finish satisfying request
 
            br      readretn
 
 readpopr:  dec     rd
-           dec     rd                 ; rd = fd+0 (start)
+           dec     rd                  ; rd = fd+0 (start)
 
 readretn:  inc     r2
 
-           lda     r2                 ; restore saved rb
+           lda     r2                  ; restore saved rb
            phi     rb
            lda     r2
            plo     rb
 
-           lda     r2                 ; restore saved ra
+           lda     r2                  ; restore saved ra
            phi     ra
            lda     r2
            plo     ra
 
-           lda     r2                 ; restore saved r9
+           lda     r2                  ; restore saved r9
            phi     r9
            lda     r2
            plo     r9
@@ -475,7 +489,7 @@ readretn:  inc     r2
            ldn     r2
            plo     r8
 
-           ldi     0                  ; return d=0, df=0, success
+           ldi     0                   ; return d=0, df=0, success
 readsret:  shr
            sep     sret
 
@@ -618,7 +632,7 @@ writleft:  inc     r8                  ; set flag to load more data
 
 writupdt:  glo     rb
            str     r2
-           glo	   ra                  ; subtract bytes we are going to copy 
+           glo     ra                  ; subtract bytes we are going to copy 
            sm                          ; from bytes requested and at the 
            plo     ra                  ; same time put into loop counter rb
            ghi     rb
@@ -740,34 +754,34 @@ writcopy:  lda     rf                  ; copy rb bytes from dta at m(r9)
            ghi     rb
            bnz     writcopy
 
-           glo     r8                 ; check if flag is set to read data
+           glo     r8                  ; check if flag is set to read data
            ani     2
-           bz      writretn           ; if not, we are done
+           bz      writretn            ; if not, we are done
 
-           dec     r8                 ; clear read data flag
+           dec     r8                  ; clear read data flag
            dec     r8
 
-           sep     scall              ; get another sector
+           sep     scall               ; get another sector
            dw      d_incofs1
 
            glo     ra
            bnz     writloop
            ghi     ra
-           bnz     writloop           ; and finish satisfying request
+           bnz     writloop            ; and finish satisfying request
 
 writretn:  inc     r2
 
-           lda     r2                 ; restore saved rb
+           lda     r2                  ; restore saved rb
            phi     rb
            lda     r2
            plo     rb
 
-           lda     r2                 ; restore saved ra
+           lda     r2                  ; restore saved ra
            phi     ra
            lda     r2
            plo     ra
 
-           lda     r2                 ; restore saved r9
+           lda     r2                  ; restore saved r9
            phi     r9
            lda     r2
            plo     r9
@@ -775,17 +789,17 @@ writretn:  inc     r2
            lda     r2
            plo     r8
 
-           lda     r2                 ; restore saved r9
+           lda     r2                  ; restore saved r9
            phi     r7
            lda     r2
            plo     r7
 
-           lda     r2                 ; restore saved r9
+           lda     r2                  ; restore saved r9
            phi     r6
            ldn     r2
            plo     r6
 
-           ldi     0                  ; return d=0, df=0, success
+           ldi     0                   ; return d=0, df=0, success
 writsret:  shr
            sep     sret
 
