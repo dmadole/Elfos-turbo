@@ -41,9 +41,9 @@ start:     br      entry
            ; Build information
 
            db      8+80h              ; month
-           db      6                  ; day
+           db      12                 ; day
            dw      2021               ; year
-           dw      0                  ; build
+           dw      3                  ; build
 
            db      'See github.com/dmadole/Elfos-turbo for more info',0
 
@@ -113,7 +113,7 @@ allocmem:  ldi     high end-module     ; length of persistent module
 
            ldi     255                 ; page-aligned
            phi     r7
-           ldi     4                   ; permanent
+           ldi     4+64                ; permanent and named
            plo     r7
 
            sep     scall               ; request memory block
@@ -132,10 +132,10 @@ gotalloc:  ghi     rf                  ; Offset to adjust addresses with
 
            ; Copy module code into the permanent heap block
 
-           ldi     high end-module     ; length of code to copy
-           phi     rc
-           ldi     low end-module
-           plo     rc
+           ldi     high modend-module  ; length of code to copy
+           phi     rb
+           ldi     low modend-module
+           plo     rb
 
            ldi     high module         ; get source address
            phi     rd
@@ -146,10 +146,22 @@ copycode:  lda     rd                  ; copy code to destination address
            str     rf
            inc     rf
            dec     rc
-           glo     rc
+           dec     rb
+           glo     rb
            lbnz    copycode
+           ghi     rb
+           lbnz    copycode
+
+           lbr     padname
+
+padloop:   ldi     0                   ; pad name with zeros to end of block
+           str     rf
+           inc     rf
+           dec     rc
+padname:   glo     rc
+           lbnz    padloop
            ghi     rc
-           lbnz    copycode
+           lbnz    padloop
 
 
            ; Update kernel hooks to point to the copied module code
@@ -184,7 +196,7 @@ hookloop:  lda     rd                 ; a zero marks end of the table
 
 finished:  sep     scall              ; output message
            dw      o_inmsg
-           db      'Turbo Filesystem Module Build 0 for Elf/OS',13,10,0
+           db      'Turbo Filesystem Module Build 3 for Elf/OS',13,10,0
            sep     sret
 
 
@@ -202,6 +214,33 @@ hooklist:  dw      o_read, read
 
 module:    ; Code for persistent module starts here
 
+
+           ; There are separate entry points for the write and read calls
+           ; but they are handled with some mostly common code through the
+           ; initialization process. They then separate into specific code
+           ; for read and write and re-merge at the end to restore registers
+           ; used from the stack. This was modified to this form to save
+           ; space and keep the module within two pages of memory.
+
+
+           ; Write bytes to file
+           ;
+           ; Input:
+           ;   RC - Number of bytes to write
+           ;   RD - Pointer to file descriptor
+           ;   RF - Pointer to write buffer
+           ;
+           ; Output:
+           ;   RC - Number of bytes actually written
+           ;   RD - Unchanged
+           ;   RF - Points after last byte written
+           ;   DF - Set if error occurred
+           ;   D  - Error code
+
+write:     ldi     1                   ; we are doing a read operation
+           lskp
+
+
            ; Read bytes from file
            ;
            ; Input:
@@ -216,7 +255,16 @@ module:    ; Code for persistent module starts here
            ;   DF - Set if error occurred
            ;   D  - Error code
 
-read:      glo     rd                  ; advance to flags, but save before
+read:      ldi     0                   ; we are doing a write operaton
+           stxd
+
+
+           ; Common initialization code for both read and write operations,
+           ; doing some basic checks on the file descriptor. This block
+           ; leaves the file descriptor flags byte in RE which will be
+           ; checked just a little later if read-only is set.
+
+           glo     rd                  ; advance to flags, but save before
            stxd
            adi     8
            plo     rd
@@ -225,7 +273,7 @@ read:      glo     rd                  ; advance to flags, but save before
            adci    0
            phi     rd                  ; rd = fd+8 (flags)
 
-           ldn     rd
+           ldn     rd                  ; save flags into re.0
            plo     re
 
            lda     r2                  ; restore original rd
@@ -233,19 +281,50 @@ read:      glo     rd                  ; advance to flags, but save before
            ldn     r2
            plo     rd                  ; rd = fd+0 (base)
 
-           glo     re
+           glo     re                  ; check valid fd bit bit
            ani     8
-           bnz     readvlid
+           bnz     fdvalid
 
            ldi     2<<1 + 1            ; return d=2, df=1, invalid fd
-           br      readsret
 
-readvlid:  glo     rc                  ; if there is nothing to do, return
-           bnz     readnot0
+poperror:  inc     r2                  ; discard read/write selector
+
+reterror:  shr                         ; return D + DF from D value
+           sep     sret
+
+
+           ; Check size of read request, if it's zero, declare success.
+
+fdvalid:   glo     rc                  ; if there is nothing to do, return
+           bnz     chkwrite
            ghi     rc
-           bz      readsret            ; return d=0, df=0, success
+           bz      poperror            ; return d=0, df=0, success
 
-readnot0:  glo     r8                  ; save r8.0 to use for flags
+
+           ; Only if this is a write operation, check the read-only flag.
+
+chkwrite:  inc     r2                  ; retrieve read/write selector
+           ldn     r2
+           bz      notwrite
+
+           glo     re                  ; check if fd is read-only
+           ani     2
+           bz      nordonly
+
+           ldi     1<<1 + 1            ; return d=1, df=1, read-only
+           br      reterror
+
+nordonly:  ldn     r2                  ; re-retrieve read/write selector
+
+
+           ; Push the registers that are used that are common to both
+           ; the read and write code paths and initialize some register
+           ; values that are also common to both. Put the read or write
+           ; indicator into RE.0 at this point to survive the pushes.
+
+notwrite:  plo     re                  ; save read/write selector to re.0
+
+           glo     r8                  ; save r8.0 to use for flags
            stxd
 
            glo     r9                  ; save r9 to use for dta pointer
@@ -273,10 +352,15 @@ readnot0:  glo     r8                  ; save r8.0 to use for flags
            plo     rc                  ; clear bytes read counter
            phi     rc
 
+           glo     re                 
+           bnz     dowrite
+
+
            ; loops back to here
 
 readloop:  inc     rd
            inc     rd                  ; rd = fd+2 (file offset nlsb)
+
 
            ; Check if we have already checked for an eof adjustment to 
            ; reduce the read bytes requested, if so, dont do it again.
@@ -284,6 +368,7 @@ readloop:  inc     rd
            glo     r8
            ani     1
            bnz     readdata
+
 
            ; The following checks if we are in the "final lump" which is the
            ; last allocation unit in the file, and if so, we are near eof.
@@ -301,6 +386,7 @@ readloop:  inc     rd
            ldn     rb                  ; check final lump flag
            ani     4
            bz      readdata
+
 
            ; If we are in the final lump, then calculate how much data is
            ; remaining in the file and if more data has been requested than
@@ -353,6 +439,7 @@ readneof:  glo     r9
            phi     ra                  ; what is actually left in file
            glo     r9 
            plo     ra
+
 
            ; Setup the source copy pointer into the current sector in memory
            ; and determine how much data we are going to copy, which will be
@@ -469,82 +556,28 @@ readcopy:  lda     r9                  ; copy rb bytes from dta at m(r9)
 readpopr:  dec     rd
            dec     rd                  ; rd = fd+0 (start)
 
-readretn:  inc     r2
-
-           lda     r2                  ; restore saved rb
-           phi     rb
-           lda     r2
-           plo     rb
-
-           lda     r2                  ; restore saved ra
-           phi     ra
-           lda     r2
-           plo     ra
-
-           lda     r2                  ; restore saved r9
-           phi     r9
-           lda     r2
-           plo     r9
-
-           ldn     r2
-           plo     r8
-
-           ldi     0                   ; return d=0, df=0, success
-readsret:  shr
-           sep     sret
+           br      readretn
 
 
-           ; Write bytes to file
-           ;
-           ; Input:
-           ;   RC - Number of bytes to write
-           ;   RD - Pointer to file descriptor
-           ;   RF - Pointer to write buffer
-           ;
-           ; Output:
-           ;   RC - Number of bytes actually written
-           ;   RD - Unchanged
-           ;   RF - Points after last byte written
-           ;   DF - Set if error occurred
-           ;   D  - Error code
+           ; Memory alignment of the following trickey is crucial.
 
-write:     glo     rd                  ; advance to flags, but save before
-           stxd
-           adi     8
-           plo     rd
-           ghi     rd
-           str     r2
-           adci    0
-           phi     rd                  ; rd = fd+8 (flags)
+           org     0feh + ($ & 0ff00h)
 
-           ldn     rd
-           plo     re
+           ; This instruction skips across the page boundary to the start
+           ; of the write routine on the next page, over the branch.
 
-           lda     r2                  ; restore original rd
-           phi     rd
-           ldn     r2
-           plo     rd                  ; rd = fd+0 (base)
+dowrite:   lskp
 
-           glo     re                  ; chec if fd is valid
-           ani     8
-           bnz     writvlid
+           ; The page break happens in-between bytes of the following branch
+           ; instruction so it actually branches into the next page.
 
-           ldi     2<<1 + 1            ; return d=2, df=1, invalid fd
-           br      writsret
+readretn:  br      readrest
 
-writvlid:  glo     re                  ; check if fd is read-only
-           ani     2
-           bz      writwrit
 
-           ldi     1<<1 + 1            ; return d=2, df=1, invalid fd
-           br      writsret
+           ; The write-specific code starts from here, this is reached by
+           ; the LSKP instruction on the proir page.
 
-writwrit:  glo     rc                  ; if there is nothing to do, return
-           bnz     writnot0
-           ghi     rc
-           bz      writsret            ; return d=0, df=0, success
-
-writnot0:  glo     r6                  ; save r9 to use for dta pointer
+           glo     r6                  ; save r9 to use for dta pointer
            stxd
            ghi     r6
            stxd
@@ -554,35 +587,8 @@ writnot0:  glo     r6                  ; save r9 to use for dta pointer
            ghi     r7
            stxd
 
-           glo     r8                  ; save r8.0 to use for flags
-           stxd
 
-           glo     r9                  ; save r9 to use for dta pointer
-           stxd
-           ghi     r9
-           stxd
-
-           glo     ra                  ; save ra for bytes requested
-           stxd
-           ghi     ra
-           stxd
-
-           glo     rb                  ; save rb to use for loop counter
-           stxd
-           ghi     rb
-           stxd
-
-           glo     rc                  ; copy bytes requested to ra
-           plo     ra
-           ghi     rc
-           phi     ra
-
-           ldi     0
-           plo     r8                  ; clear flags byte
-           plo     rc                  ; clear bytes read counter
-           phi     rc
-
-           ; loops back to here
+           ; Processing of write operations loops back to here
 
 writloop:  inc     rd
            inc     rd                  ; rd = fd+2 (file offset nlsb)
@@ -771,6 +777,18 @@ writcopy:  lda     rf                  ; copy rb bytes from dta at m(r9)
 
 writretn:  inc     r2
 
+           lda     r2                  ; restore saved r9
+           phi     r7
+           lda     r2
+           plo     r7
+
+           lda     r2                  ; restore saved r9
+           phi     r6
+           ldn     r2
+           plo     r6
+
+readrest:  inc     r2
+
            lda     r2                  ; restore saved rb
            phi     rb
            lda     r2
@@ -786,22 +804,16 @@ writretn:  inc     r2
            lda     r2
            plo     r9
 
-           lda     r2
+           ldn     r2
            plo     r8
 
-           lda     r2                  ; restore saved r9
-           phi     r7
-           lda     r2
-           plo     r7
-
-           lda     r2                  ; restore saved r9
-           phi     r6
-           ldn     r2
-           plo     r6
-
-           ldi     0                   ; return d=0, df=0, success
-writsret:  shr
+           ldi     0
+           shr
            sep     sret
+
+           db      0,'Turbo',0
+
+modend:    ; End of the code that is loaded to persistent heap block
 
 end:       ; That's all, folks!
 
